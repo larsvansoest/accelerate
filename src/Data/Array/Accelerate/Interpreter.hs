@@ -6,7 +6,7 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE InstanceSigs        #-}
-{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash           #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -23,7 +23,7 @@
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns        #-}
-{-# LANGUAGE LambdaCase        #-}
+
 
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_HADDOCK prune #-}
@@ -145,7 +145,7 @@ instance StaticClusterAnalysis InterpretOp where
   onOp (IScan1 _ _) _ _ _ = BCA id :>: BCA id :>: BCA id :>: ArgsNil -- here we trust that our ILP prevented any backpermutes after the scan
   onOp (IAppend Left n) (BCA outF :>: ArgsNil) (_ :>: i :>: _ :>: ArgsNil) env =
     let ArgArray In _ (flip varsGetVal env -> (_, sz)) _ = i
-        inF x = outF $ (+ (x `mod` sz) * (sz + n)) $ n + (x `div` sz) -- or something like this :)
+        inF x = outF $ (+ x `mod` sz * (sz + n)) $ n + x `div` sz -- or something like this :)
     in BCA outF :>: BCA inF :>: BCA outF :>: ArgsNil
   onOp (IAppend Right _) (BCA outF :>: ArgsNil) _ _ =
     BCA outF :>: BCA outF :>: BCA outF :>: ArgsNil
@@ -287,7 +287,7 @@ instance IsKernel InterpretKernel where
   type KernelOperation InterpretKernel = InterpretOp
   type KernelMetadata  InterpretKernel = NoKernelMetadata
 
-  compileKernel = const $ InterpretKernel
+  compileKernel = const InterpretKernel
 
 instance PrettyKernel InterpretKernel where
   -- PrettyKernelBody provides a Val but prettyOpWithArgs expects a Val', should we change them to have the
@@ -684,7 +684,7 @@ firstOfRow :: Int -> Sh sh e -> Int -> Int
 firstOfRow i (Shape ShapeRz ()) idleRowsLeft
   | i > idleRowsLeft = i - idleRowsLeft
   | otherwise = error "not in a row"
-firstOfRow i (Shape (ShapeRsnoc _) (_, n)) idleRowsLeft = (i `mod` (n + idleRowsLeft)) - idleRowsLeft
+firstOfRow i (Shape (ShapeRsnoc _) (_, n)) idleRowsLeft = i `mod` (n + idleRowsLeft) - idleRowsLeft
 
 
 
@@ -756,33 +756,53 @@ fromFunction' repr sh f = (TupRsingle repr, fromFunction repr sh f)
 -- Scalar expression evaluation
 -- ----------------------------
 
-newtype EvalArrayInstr arr = EvalArrayInstr (forall s t. arr (s -> t) -> s -> t)
+newtype EvalArrayInstr m arr = EvalArrayInstr (forall s t. arr (s -> t) -> s -> m t)
 
-evalArrayInstrDefault :: Val aenv -> EvalArrayInstr (ArrayInstr aenv)
-evalArrayInstrDefault aenv = EvalArrayInstr $ \instr arg -> case instr of
+evalArrayInstrDefault :: Val aenv -> EvalArrayInstr Identity (ArrayInstr aenv)
+evalArrayInstrDefault = runIdentity $ Identity evalArrayInstrDefaultM
+
+evalArrayInstrDefaultM :: (Monad m) => Val aenv -> EvalArrayInstr m (ArrayInstr aenv)
+evalArrayInstrDefaultM aenv = EvalArrayInstr $ \instr arg -> return $ case instr of
   Index buffer  -> indexBuffer (groundRelt $ varType buffer) (prj (varIdx buffer) aenv) arg
   Parameter var -> prj (varIdx var) aenv
 
-evalNoArrayInstr :: EvalArrayInstr NoArrayInstr
-evalNoArrayInstr = EvalArrayInstr $ \instr -> case instr of {}
+evalNoArrayInstr :: EvalArrayInstr Identity NoArrayInstr
+evalNoArrayInstr = runIdentity $ Identity evalNoArrayInstrM
+
+evalNoArrayInstrM :: (Monad m) => EvalArrayInstr m NoArrayInstr
+evalNoArrayInstrM = EvalArrayInstr $ \instr -> case instr of {}
 
 -- Evaluate a closed scalar expression
 --
-evalExp :: HasCallStack => PreOpenExp arr () t -> EvalArrayInstr arr -> t
+evalExp :: HasCallStack => PreOpenExp arr () t -> EvalArrayInstr Identity arr -> t
 evalExp e = evalOpenExp e Empty
+
+-- Evaluate a closed scalar expression
+--
+evalExpM :: (Monad m, HasCallStack) => PreOpenExp arr () t -> EvalArrayInstr m arr -> m t
+evalExpM e = evalOpenExpM e Empty
 
 -- Evaluate a closed scalar function
 --
-evalFun :: HasCallStack => PreOpenFun arr () t -> EvalArrayInstr arr -> t
+evalFun :: HasCallStack => PreOpenFun arr () t -> EvalArrayInstr Identity arr -> t
 evalFun f = evalOpenFun f Empty
+
+-- Evaluate a closed scalar function
+--
+evalFunM :: (Monad m, HasCallStack) => PreOpenFun arr () t -> EvalArrayInstr m arr -> m t
+evalFunM f = evalOpenFunM f Empty
 
 -- Evaluate an open scalar function
 --
-evalOpenFun :: HasCallStack => PreOpenFun arr env t -> Val env -> EvalArrayInstr arr -> t
+evalOpenFun :: HasCallStack => PreOpenFun arr env t -> Val env -> EvalArrayInstr Identity arr -> t
 evalOpenFun (Body e)    env arr = evalOpenExp e env arr
-evalOpenFun (Lam lhs f) env arr =
-  \x -> evalOpenFun f (env `push` (lhs, x)) arr
+evalOpenFun (Lam lhs f) env arr = \x -> evalOpenFun f (env `push` (lhs, x)) arr
 
+-- Evaluate an open scalar function
+--
+evalOpenFunM :: (Monad m, HasCallStack) => PreOpenFun arr env t -> Val env -> EvalArrayInstr m arr -> m t
+evalOpenFunM (Body e)    env arr = evalOpenExpM e env arr
+evalOpenFunM (Lam _ _) _ _       = internalError "non-unary methods not supported inside monads"
 
 -- Evaluate an open scalar expression
 --
@@ -796,33 +816,52 @@ evalOpenExp
     :: forall env arr t. HasCallStack
     => PreOpenExp arr env t
     -> Val env
-    -> EvalArrayInstr arr
+    -> EvalArrayInstr Identity arr
     -> t
-evalOpenExp pexp env arr@(EvalArrayInstr runArrayInstr) =
-  let
-      evalE :: PreOpenExp arr env t' -> t'
-      evalE e = evalOpenExp e env arr
+evalOpenExp pexp env arr = runIdentity $ evalOpenExpM pexp env arr
 
-      evalF :: PreOpenFun arr env f' -> f'
-      evalF f = evalOpenFun f env arr
+-- Evaluate an open scalar expression
+--
+-- NB: The implementation of 'Index' and 'Shape' demonstrate clearly why
+--     array expressions must be hoisted out of scalar expressions before code
+--     execution. If these operations are in the body of a function that gets
+--     mapped over an array, the array argument would be evaluated many times
+--     leading to a large amount of wasteful recomputation.
+--
+evalOpenExpM
+    :: forall m env arr t. (Monad m, HasCallStack)
+    => PreOpenExp arr env t
+    -> Val env
+    -> EvalArrayInstr m arr
+    -> m t
+evalOpenExpM pexp env arr@(EvalArrayInstr runArrayInstr) =
+  let
+      evalE :: PreOpenExp arr env t' -> m t'
+      evalE e = evalOpenExpM e env arr
+
+      evalF :: PreOpenFun arr env f' -> m f'
+      evalF f = evalOpenFunM f env arr
   in
   case pexp of
-    Let lhs exp1 exp2           -> let !v1  = evalE exp1
-                                       env' = env `push` (lhs, v1)
-                                   in  evalOpenExp exp2 env' arr
-    Evar (Var _ ix)             -> prj ix env
-    Const _ c                   -> c
-    Undef tp                    -> undefElt (TupRsingle tp)
-    PrimConst c                 -> evalPrimConst c
-    PrimApp f x                 -> evalPrim f (evalE x)
-    Nil                         -> ()
-    Pair e1 e2                  -> let !x1 = evalE e1
-                                       !x2 = evalE e2
-                                   in  (x1, x2)
-    VecPack   vecR e            -> pack   vecR $! evalE e
-    VecUnpack vecR e            -> unpack vecR $! evalE e
-    IndexSlice slice slix sh    -> restrict slice (evalE slix)
-                                                  (evalE sh)
+    Let lhs exp1 exp2           -> do !v1 <- evalE exp1
+                                      let env' = env `push` (lhs, v1)
+                                      evalOpenExpM exp2 env' arr
+    Evar (Var _ ix)             -> return $ prj ix env
+    Const _ c                   -> return c
+    Undef tp                    -> return $ undefElt (TupRsingle tp)
+    PrimConst c                 -> return $ evalPrimConst c
+    PrimApp f x                 -> do v <- evalE x
+                                      return $ evalPrim f v
+    Nil                         -> return ()
+    Pair e1 e2                  -> do !x1 <- evalE e1
+                                      !x2 <- evalE e2
+                                      return (x1, x2)
+    VecPack   vecR e            -> do v <- evalE e
+                                      return $ pack vecR $! v
+    VecUnpack vecR e            -> do v <- evalE e
+                                      return $ unpack vecR $! v
+    IndexSlice slice slix sh    -> do vSlix <- evalE slix
+                                      restrict slice vSlix <$> evalE sh
       where
         restrict :: SliceIndex slix sl co sh -> slix -> sh -> sl
         restrict SliceNil              ()        ()         = ()
@@ -832,8 +871,8 @@ evalOpenExp pexp env arr@(EvalArrayInstr runArrayInstr) =
         restrict (SliceFixed sliceIdx) (slx, _i)  (sl, _sz) =
           restrict sliceIdx slx sl
 
-    IndexFull slice slix sh     -> extend slice (evalE slix)
-                                                (evalE sh)
+    IndexFull slice slix sh     -> do vSlix <- evalE slix
+                                      extend slice vSlix <$> evalE sh
       where
         extend :: SliceIndex slix sl co sh -> slix -> sl -> sh
         extend SliceNil              ()        ()       = ()
@@ -844,9 +883,12 @@ evalOpenExp pexp env arr@(EvalArrayInstr runArrayInstr) =
           let sh' = extend sliceIdx slx sl
           in  (sh', sz)
 
-    ToIndex shr sh ix           -> toIndex shr (evalE sh) (evalE ix)
-    FromIndex shr sh ix         -> fromIndex shr (evalE sh) (evalE ix)
-    Case e rhs def              -> evalE (caseof (evalE e) rhs)
+    ToIndex shr sh ix           -> do vSh <- evalE sh
+                                      toIndex shr vSh <$> evalE ix
+    FromIndex shr sh ix         -> do vSh <- evalE sh
+                                      fromIndex shr vSh <$> evalE ix
+    Case e rhs def              -> do v <- evalE e
+                                      evalE (caseof v rhs)
       where
         caseof :: TAG -> [(TAG, PreOpenExp arr env t)] -> PreOpenExp arr env t
         caseof tag = go
@@ -858,23 +900,25 @@ evalOpenExp pexp env arr@(EvalArrayInstr runArrayInstr) =
               | Just d <- def = d
               | otherwise     = internalError "unmatched case"
 
-    Cond c t e
-      | toBool (evalE c)        -> evalE t
-      | otherwise               -> evalE e
+    Cond c t e -> do v <- evalE c
+                     if toBool v then evalE t else evalE e
 
-    While cond body seed        -> go (evalE seed)
-      where
-        f       = evalF body
-        p       = evalF cond
-        go !x
-          | toBool (p x) = go (f x)
-          | otherwise    = x
+    While cond body seed        -> do f <- evalF body
+                                      p <- evalF cond
+                                      s <- evalE seed
+                                      let go !x
+                                           | toBool (p x) = go (f x)
+                                           | otherwise    = x
+                                      return $ go s
 
-    ArrayInstr instr ix         -> runArrayInstr instr (evalE ix)
-    ShapeSize shr sh            -> size shr (evalE sh)
-    Foreign _ _ f e             -> evalOpenFun f Empty evalNoArrayInstr $ evalE e
-    Coerce t1 t2 e              -> evalCoerceScalar t1 t2 (evalE e)
-
+    ArrayInstr instr ix         -> do v <- evalE ix
+                                      runArrayInstr instr v
+    ShapeSize shr sh            -> do vSh <- evalE sh
+                                      return $ size shr vSh
+    Foreign _ _ f e             -> do v <- evalE e
+                                      return $ evalOpenFun f Empty evalNoArrayInstr v 
+    Coerce t1 t2 e              -> do v <- evalE e 
+                                      return $ evalCoerceScalar t1 t2 v
 
 -- Coercions
 -- ---------
