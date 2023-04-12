@@ -44,7 +44,7 @@ instance (MakesILP op, MIP.IsSolver s IO) => ILPSolver s op where
   solve s (ILP dir obj constr bnds n) = makeSolution names <$> MIP.solve s options problem
     where
       options = MIP.SolveOptions{ MIP.solveTimeLimit   = Nothing
-                                , MIP.solveLogger      = putStrLn . ("AccILPSolver: "      ++)
+                                , MIP.solveLogger      = \_ -> return ()
                                 , MIP.solveErrorLogger = putStrLn . ("AccILPSolverError: " ++) }
 
       stateProblem = Problem (Just "AccelerateILP") <$> (mkFun dir <$> expr n obj) <*> cons n constr <*> pure [] <*> pure [] <*> vartypes <*> (bounds bnds >>= finishBounds)
