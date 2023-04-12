@@ -6,7 +6,6 @@
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE InstanceSigs        #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MagicHash           #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -18,15 +17,15 @@
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE TupleSections       #-}
 {-# LANGUAGE TypeApplications    #-}
-{-# LANGUAGE TypeFamilies        #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE TypeOperators       #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns        #-}
-
+{-# LANGUAGE LambdaCase           #-}
 
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 {-# OPTIONS_HADDOCK prune #-}
+
 -- |
 -- Module      : Data.Array.Accelerate.Interpreter
 -- Description : Reference backend (interpreted)
@@ -41,12 +40,10 @@
 -- semantics of the embedded array language. The emphasis is on defining
 -- the semantics clearly, not on performance.
 --
-
 module Data.Array.Accelerate.Interpreter (
   module Data.Array.Accelerate.Interpreter,
   UniformScheduleFun
 ) where
-
 import Prelude                                                      hiding (take, (!!), sum, Either(..) )
 import Data.Array.Accelerate.AST.Partitioned hiding (Empty)
 import Data.Array.Accelerate.AST.Operation
@@ -83,7 +80,6 @@ import Data.Array.Accelerate.Trafo.Partitioning.ILP.Solver
 import Lens.Micro ((.~), (&))
 import Data.Array.Accelerate.Array.Buffer
 import Data.Array.Accelerate.Pretty.Partitioned ()
-import Data.Array.Accelerate.Pretty.Schedule
 import Data.Array.Accelerate.AST.Idx
 import Data.Array.Accelerate.AST.LeftHandSide (LeftHandSide (LeftHandSideWildcard, LeftHandSideUnit))
 import Data.Array.Accelerate.AST.Schedule
@@ -91,7 +87,6 @@ import Data.Array.Accelerate.AST.Schedule
 import Control.Concurrent (forkIO)
 import Data.IORef
 import Control.Concurrent.MVar
-
 import Data.Array.Accelerate.AST.Schedule.Uniform (UniformScheduleFun)
 import Data.Array.Accelerate.Trafo.Schedule.Uniform ()
 import Data.Array.Accelerate.Pretty.Schedule.Uniform ()
@@ -103,33 +98,23 @@ import Data.Array.Accelerate.Trafo.Operation.Substitution (alet, aletUnique, wea
 import Control.DeepSeq (rnf)
 import Data.Map (Map)
 import System.IO.Unsafe (unsafePerformIO)
-
 import Data.Array.Accelerate.Eval
 import qualified Data.Array.Accelerate.AST.Partitioned as P
 import Data.Functor.Identity
-import Data.Array.Accelerate.Trafo.LiveVars (subTup)
-
+import Data.Array.Accelerate.Trafo.LiveVars
 data Interpreter
 instance Backend Interpreter where
   type Schedule Interpreter = UniformScheduleFun
   type Kernel Interpreter = InterpretKernel
-
-
-
-
 -- Pushes backpermute information through the cluster and stores it in the arguments, for use at the start of the loop (indexing) and in generates.
 makeBackpermuteArg :: Args env args -> Val env -> Cluster InterpretOp args -> BackendArgs InterpretOp env args
 makeBackpermuteArg = makeBackendArg
-
 instance Eq (BackendClusterArg2 InterpretOp env arg) where
   -- this is just a sanity check
   BCA f == BCA g = map f [1..100] == map g [1..100]
-
-
 -- TODO add the dimsperthread and idlethreads stuff
 instance StaticClusterAnalysis InterpretOp where
   data BackendClusterArg2 InterpretOp env arg = BCA (Int -> Int)
-
   onOp IBackpermute (BCA outF :>: ArgsNil) (ArgFun f :>: i :>: o :>: ArgsNil) env =
     let ArgArray In  (ArrayR shr  _) (flip varsGetVal env -> sh ) _ = i
         ArgArray Out (ArrayR shr' _) (flip varsGetVal env -> sh') _ = o in
@@ -146,11 +131,10 @@ instance StaticClusterAnalysis InterpretOp where
   onOp (IScan1 _ _) _ _ _ = BCA id :>: BCA id :>: BCA id :>: ArgsNil -- here we trust that our ILP prevented any backpermutes after the scan
   onOp (IAppend Left n) (BCA outF :>: ArgsNil) (_ :>: i :>: _ :>: ArgsNil) env =
     let ArgArray In _ (flip varsGetVal env -> (_, sz)) _ = i
-        inF x = outF $ (+ x `mod` sz * (sz + n)) $ n + x `div` sz -- or something like this :)
+        inF x = outF $ (+ (x `mod` sz) * (sz + n)) $ n + (x `div` sz) -- or something like this :)
     in BCA outF :>: BCA inF :>: BCA outF :>: ArgsNil
   onOp (IAppend Right _) (BCA outF :>: ArgsNil) _ _ =
     BCA outF :>: BCA outF :>: BCA outF :>: ArgsNil
-
   valueToIn    (BCA f) = BCA f
   valueToOut   (BCA f) = BCA f
   inToValue    (BCA f) = BCA f
@@ -164,9 +148,7 @@ instance StaticClusterAnalysis InterpretOp where
   shrinkOrGrow (BCA f) = BCA f
   addTup       (BCA f) = BCA f
   justUnit = BCA undefined
-
   def _ _ _ = BCA id
-
 -- we can implement stencils using clamp, mirror or wrap with backpermute and zipwith(map), but for stencils using function we need a little extra.
 data InterpretOp args where
   IMap         :: InterpretOp (Fun' (s -> t)    -> In sh s -> Out sh  t -> ())
@@ -185,7 +167,6 @@ data InterpretOp args where
   IScan1      :: Direction -> IORef (Map Int e) -> InterpretOp (Fun' (e -> e -> e) -> In (sh, Int) e -> Out (sh, Int) e -> ())
   -- append a number of elements to the left or right of each innermost row using the generate function
   IAppend :: Side -> Int -> InterpretOp (Fun' ((sh, Int) -> e) -> In (sh, Int) e -> Out (sh, Int) e -> ())
-
 instance DesugarAcc InterpretOp where
   mkMap         a b c   = Exec IMap         (a :>: b :>: c :>:       ArgsNil)
   mkBackpermute a b c   = Exec IBackpermute (a :>: b :>: c :>:       ArgsNil)
@@ -231,7 +212,6 @@ instance DesugarAcc InterpretOp where
               (ArgFun $ Lam (LeftHandSideWildcard $ shapeType shr) $ Body $ weakenThroughReindex wTemp1 reindexExp seed)
               (ArgArray In arr (weakenVars wTemp1 sh) (kTemp2 weakenId))
               (weaken wTemp1 o)
-
             -- mkBackpermuteOr 
             --   (case dir of
             --     -- The easy direction: identity backpermute, the default case will trigger on the last element
@@ -245,7 +225,6 @@ instance DesugarAcc InterpretOp where
             --         ArgFun $ Lam (lhs `LeftHandSidePair` LeftHandSideSingle scalarTypeInt) $ 
             --           Body $ Pair (expVars $ weakenVars (weakenSucc' weakenId) vars) (PrimApp (PrimMin $ NumSingleType $ IntegralNumType TypeInt) $ Pair (Evar (Var scalarTypeInt ZeroIdx)) (Const scalarTypeInt 1))
             --   )
-
 instance EncodeOperation InterpretOp where
   encodeOperation IMap                 = intHost $(hashQ ("Map" :: String))
   encodeOperation IBackpermute         = intHost $(hashQ ("Backpermute" :: String))
@@ -256,34 +235,27 @@ instance EncodeOperation InterpretOp where
   encodeOperation (IScan1 RightToLeft _) = intHost $(hashQ ("Scanr1" :: String))
   encodeOperation (IAppend Left  n)    = intHost $(hashQ ("Appendl" :: String)) <> intHost n
   encodeOperation (IAppend Right n)    = intHost $(hashQ ("Appendr" :: String)) <> intHost n
-
 mkAppend :: Side -> Int -> Arg env (Fun' ((sh, Int) -> e)) -> Arg env (In (sh, Int) e) -> Arg env (Out (sh, Int) e) -> OperationAcc InterpretOp env ()
 mkAppend side i a b c = Exec (IAppend side i) (a :>: b :>: c :>: ArgsNil)
-
 -- mkBackpermuteOr :: Arg env (Fun' (sh' -> sh))
 --                 -> Arg env (Fun' (sh  -> t ))
 --                 -> Arg env (In sh t)
 --                 -> Arg env (Out sh' t)
 --                 -> OperationAcc InterpretOp env ()
 -- mkBackpermuteOr a b c d = Exec IBackpermuteOr (a :>: b :>: c :>: d :>: ArgsNil)
-
 instance SimplifyOperation InterpretOp where
   detectCopy _          IMap         = detectMapCopies
   detectCopy matchVars' IBackpermute = detectBackpermuteCopies matchVars'
   detectCopy _ _                     = const []
-
 instance SLVOperation InterpretOp where
   slvOperation IGenerate    = defaultSlvGenerate    IGenerate
   slvOperation IMap         = defaultSlvMap         IMap
   slvOperation IBackpermute = defaultSlvBackpermute IBackpermute
   slvOperation _            = Nothing
-
 data InterpretKernel env where
   InterpretKernel :: Cluster InterpretOp args -> Args env args -> InterpretKernel env
-
 instance NFData' InterpretKernel where
   rnf' (InterpretKernel cluster args) = rnf' cluster `seq` rnfArgs args
-
 instance IsKernel InterpretKernel where
   type KernelOperation InterpretKernel = InterpretOp
   type KernelMetadata  InterpretKernel = NoKernelMetadata
@@ -599,8 +571,8 @@ instance EvalOp InterpretOp where
     pure $ Push Empty (FromArg $ Value' (Identity $ evalFun f (evalArrayInstrDefault env) (fromIndex shr (runIdentity sh) (bp i))) (Shape' shr sh))
   evalOp _ _ _ _ = error "evalOp todo"
 
-  writeOutput r sh buf env n (Identity x) = writeBuffers (TupRsingle r) (veryUnsafeUnfreezeBuffers (TupRsingle r) $ varsGetVal buf env) n x
-  readInput r sh buf env (BCA f) n = Identity <$> indexBuffers' (TupRsingle r) (varsGetVal buf env) (f n)
+  writeOutput r _ buf env n (Identity x) = writeBuffers (TupRsingle r) (veryUnsafeUnfreezeBuffers (TupRsingle r) $ varsGetVal buf env) n x
+  readInput r _ buf env (BCA f) n = Identity <$> indexBuffers' (TupRsingle r) (varsGetVal buf env) (f n)
 
   indexsh  gvs env = pure . Identity $ varsGetVal gvs env
   indexsh' evs env = pure . Identity $ varsGetVal evs env
@@ -614,12 +586,13 @@ evalClusterInterpreter c@(Cluster _ (Cluster' io _)) args env = doNTimes (iterat
 iterationsize :: ClusterIO args i o -> Args env args -> Val env -> Int
 iterationsize io args env = case io of
   P.Empty -> error "no size"
-  P.Output _ _ _ io' -> case args of ArgArray Out (ArrayR shr _) sh _ :>: args' -> arrsize shr (varsGetVal sh env)
+  P.Output {}   -> case args of ArgArray Out (ArrayR shr _) sh _ :>: _ -> arrsize shr (varsGetVal sh env)
   P.Vertical _ _ io' -> case args of -- skip past this one
     ArgVar _ :>: args' -> iterationsize io' args' env
-  P.Input  io'       -> case args of ArgArray In  (ArrayR shr _) sh _ :>: args' -> iterationsize io' args' env   -- -> arrsize shr (varsGetVal sh env)
-  P.MutPut io'       -> case args of ArgArray Mut (ArrayR shr _) sh _ :>: args' -> iterationsize io' args' env -- arrsize shr (varsGetVal sh env)
+  P.Input  io'       -> case args of ArgArray In  _ _ _ :>: args' -> iterationsize io' args' env   -- -> arrsize shr (varsGetVal sh env)
+  P.MutPut io'       -> case args of ArgArray Mut _ _ _ :>: args' -> iterationsize io' args' env -- arrsize shr (varsGetVal sh env)
   P.ExpPut' io' -> case args of _ :>: args' -> iterationsize io' args' env -- skip past this one
+  P.Trivial io' -> case args of _ :>: args' -> iterationsize io' args' env
 
 
 arrsize :: ShapeR sh -> sh -> Int
