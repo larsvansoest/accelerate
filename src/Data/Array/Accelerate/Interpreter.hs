@@ -595,7 +595,9 @@ instance EvalOp InterpretOp where
     pure $ Push Empty (FromArg $ Value' (Identity $ evalFun f (evalArrayInstrDefault env) x) (Shape' shr sh))
   evalOp _ IBackpermute _ (Push (Push (Push _ (BAE sh _)) (BAE (Value' x _) _)) _) =
     pure $ Push Empty (FromArg $ Value' x sh) -- We evaluated the backpermute at the start already, now simply relabel the shape info
-  evalOp _ _ _ _ = undefined
+  evalOp i IGenerate env (Push (Push _ (BAE (Shape' shr sh) (BCA bp))) (BAE f _)) =
+    pure $ Push Empty (FromArg $ Value' (Identity $ evalFun f (evalArrayInstrDefault env) (fromIndex shr (runIdentity sh) (bp i))) (Shape' shr sh))
+  evalOp _ _ _ _ = error "evalOp todo"
 
   writeOutput r sh buf env n (Identity x) = writeBuffers (TupRsingle r) (veryUnsafeUnfreezeBuffers (TupRsingle r) $ varsGetVal buf env) n x
   readInput r sh buf env (BCA f) n = Identity <$> indexBuffers' (TupRsingle r) (varsGetVal buf env) (f n)
