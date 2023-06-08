@@ -187,7 +187,7 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
                             @(PreOpenAcc (Cluster op) env _)
                             facc)
          CWhl env' c b i u -> case (subcluster c, subcluster b) of
-           (~[NonExecL c'], ~[NonExecL b']) -> case (makeASTF env c' prev, makeASTF env b' prev) of
+           (findTopOfF -> c', findTopOfF -> b') -> case (makeASTF env c' prev, makeASTF env b' prev) of
             (Exists cfun, Exists bfun) -> Exists $ Awhile
               u
               -- [See NOTE unsafeCoerce result type]
@@ -274,9 +274,18 @@ openReconstruct' labelenv graph clusterslist mlab subclustersmap construct = cas
     fuseCluster NotFold{}   _ = error "fuseCluster encountered NotFold" -- Should only occur in singleton clusters
     fuseCluster _   NotFold{} = error "fuseCluster encountered NotFold" -- Should only occur in singleton clusters
 
+    findTopOfF :: [ClusterL] -> Label
+    findTopOfF [] = error "empty list"
+    findTopOfF [NonExecL x] = x
+    findTopOfF (x@(NonExecL l):xs) = case construct M.! l of
+      CBod -> findTopOfF xs
+      CFun _ l' -> findTopOfF $ filter (\(NonExecL l'') -> l'' /= l') xs ++ [x]
+      _ -> error "should be a function"
+      -- findTopOfF $ filter (\(NonExecL l) -> Just l /= p) xs ++ [x]
+    findTopOfF _ = error "should be a function"
+
 weakenAcc :: LeftHandSide s t env env' -> PreOpenAcc op env a -> PreOpenAcc op env' a
 weakenAcc lhs =  runIdentity . reindexAcc (weakenReindex $ weakenWithLHS lhs)
-
 
 -- | Internal datatype for `makeCluster`.
 
